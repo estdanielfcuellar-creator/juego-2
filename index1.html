@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VR Boxing - WebXR Native & WebCam</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; color: #fff; }
+        #canvas-container { width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; }
+        #webcam-video { display: none; }
+
+        /* HUD */
+        #hud {
+            position: absolute; top: 20px; left: 20px; right: 20px;
+            display: flex; justify-content: space-between; align-items: flex-start;
+            z-index: 10; pointer-events: none;
+        }
+        .bar-container {
+            width: 38%; background: rgba(10, 10, 15, 0.85);
+            border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 8px; padding: 12px;
+        }
+        .bar-label { font-size: 13px; font-weight: 700; margin-bottom: 6px; text-transform: uppercase; }
+        .bar-bg { width: 100%; height: 16px; background: #1a1a24; border-radius: 4px; overflow: hidden; }
+        .bar-fill { height: 100%; width: 100%; transition: width 0.2s ease; }
+        #player-health-fill { background: #10b981; }
+        #rival-health-fill { background: #ef4444; }
+
+        #timer-card {
+            background: rgba(10, 10, 15, 0.9); border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 10px 24px; border-radius: 8px; text-align: center;
+        }
+        #timer-val { font-size: 32px; font-weight: 800; color: #f59e0b; }
+
+        #audio-controls {
+            position: absolute; top: 90px; right: 20px; z-index: 10;
+            background: rgba(10, 10, 15, 0.8); border: 1px solid rgba(255,255,255,0.15);
+            padding: 8px 14px; border-radius: 20px; display: flex; align-items: center; gap: 8px; font-size: 12px;
+        }
+
+        .overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(5, 5, 8, 0.9); display: flex; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 20; text-align: center;
+        }
+        .hidden { display: none !important; }
+        .card {
+            background: rgba(20, 20, 30, 0.95); border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px; padding: 40px; max-width: 500px; width: 90%;
+        }
+        h1 { font-size: 32px; font-weight: 800; margin-bottom: 12px; }
+        p { color: #9ca3af; font-size: 14px; margin-bottom: 24px; }
+        .btn {
+            background: #dc2626; color: white; border: none;
+            padding: 16px 36px; font-size: 16px; font-weight: 700; border-radius: 8px; cursor: pointer;
+            margin: 5px;
+        }
+
+        #vr-btn-container {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 15;
+        }
+
+        #status-bar {
+            position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
+            z-index: 10; background: rgba(10, 10, 15, 0.8); padding: 8px 20px; border-radius: 20px;
+            font-size: 12px; border: 1px solid rgba(255,255,255,0.1); pointer-events: none;
+        }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/vr/VRButton.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <video id="webcam-video" playsinline></video>
+    <div id="canvas-container"></div>
+
+    <div id="hud">
+        <div class="bar-container">
+            <div class="bar-label" style="color:#10b981;">Tú</div>
+            <div class="bar-bg"><div id="player-health-fill" class="bar-fill"></div></div>
+        </div>
+        <div id="timer-card">
+            <div id="timer-val">90</div>
+        </div>
+        <div class="bar-container">
+            <div class="bar-label" style="color:#ef4444; text-align:right;">Rival</div>
+            <div class="bar-bg"><div id="rival-health-fill" class="bar-fill"></div></div>
+        </div>
+    </div>
+
+    <div id="audio-controls">
+        🎵 Música: <input type="range" id="music-vol" min="0" max="1" step="0.1" value="0.3">
+    </div>
+
+    <div id="vr-btn-container"></div>
+    <div id="status-bar">Inicializando motor VR...</div>
+
+    <div id="start-screen" class="overlay">
+        <div class="card">
+            <h1>REAL BOXING VR</h1>
+            <p>Compatible con PC (Webcam) y Gafas de Realidad Virtual (WebXR Native).</p>
+            <button class="btn" id="start-btn">JUGAR EN PANTALLA / PC</button>
+        </div>
+    </div>
+
+    <div id="end-screen" class="overlay hidden">
+        <div class="card">
+            <h1 id="end-title">FIN DEL COMBATE</h1>
+            <button class="btn" id="restart-btn">REPETIR</button>
+        </div>
+    </div>
+
+    <script>
+        const GAME = { duration: 90, playerHealth: 100, rivalHealth: 100, isPlaying: false, timeRemaining: 90 };
+        let scene, camera, renderer, gloves = [], rivalGroup;
+        let rivalState = 'idle', rivalTimer = 0, clockInterval;
+        let controller1, controller2;
+
+        const SoundEngine = {
+            ctx: null, musicGain: null, timer: null, step: 0,
+            init() {
+                if(!this.ctx) {
+                    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    this.musicGain = this.ctx.createGain();
+                    this.musicGain.gain.value = 0.3;
+                    this.musicGain.connect(this.ctx.destination);
+                }
+            },
+            playPunch() {
+                if(!this.ctx) return;
+                let osc = this.ctx.createOscillator();
+                let gain = this.ctx.createGain();
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(120, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(20, this.ctx.currentTime + 0.12);
+                gain.gain.setValueAtTime(0.8, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.12);
+                osc.connect(gain); gain.connect(this.ctx.destination);
+                osc.start(); osc.stop(this.ctx.currentTime + 0.12);
+            },
+            startMusic() {
+                this.init();
+                if(this.timer) clearInterval(this.timer);
+                const bassNotes = [110, 110, 130, 110, 98, 110, 146, 130];
+                this.step = 0;
+                this.timer = setInterval(() => {
+                    if(!GAME.isPlaying) return;
+                    let osc = this.ctx.createOscillator();
+                    let gain = this.ctx.createGain();
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(bassNotes[this.step % bassNotes.length], this.ctx.currentTime);
+                    gain.gain.setValueAtTime(0.15, this.ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.2);
+                    osc.connect(gain); gain.connect(this.musicGain);
+                    osc.start(); osc.stop(this.ctx.currentTime + 0.2);
+                    this.step++;
+                }, 200);
+            },
+            stopMusic() { if(this.timer) clearInterval(this.timer); },
+            setVolume(val) { if(this.musicGain) this.musicGain.gain.value = val; }
+        };
+
+        function init3D() {
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0a10);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.65, 2.0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            
+            // Habilitar soporte WebXR para gafas VR
+            renderer.xr.enabled = true;
+            container.appendChild(renderer.domElement);
+
+            // Agregar botón nativo de VR
+            document.getElementById('vr-btn-container').appendChild(VRButton.createButton(renderer));
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            dirLight.position.set(0, 5, 2);
+            scene.add(dirLight);
+
+            createRing();
+            createRival();
+            createPlayerGloves();
+            setupVRControllers();
+
+            window.addEventListener('resize', onWindowResize);
+
+            // Bucle principal compatible con WebXR
+            renderer.setAnimationLoop(renderLoop);
+        }
+
+        function setupVRControllers() {
+            controller1 = renderer.xr.getController(0);
+            controller2 = renderer.xr.getController(1);
+
+            scene.add(controller1);
+            scene.add(controller2);
+
+            // Conectar mandos/manos de las gafas a los guantes
+            controller1.add(gloves[0]);
+            controller2.add(gloves[1]);
+
+            gloves[0].position.set(0,0,0);
+            gloves[1].position.set(0,0,0);
+        }
+
+        function createRing() {
+            const floorGeo = new THREE.PlaneGeometry(8, 8);
+            const floorMat = new THREE.MeshBasicMaterial({ color: 0x1e293b });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
+        }
+
+        function createRival() {
+            rivalGroup = new THREE.Group();
+            rivalGroup.position.set(0, 0, -0.6);
+
+            const skinMat = new THREE.MeshLambertMaterial({ color: 0xd97706 });
+            const gloveMat = new THREE.MeshLambertMaterial({ color: 0xdc2626 });
+
+            const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.2, 0.8, 12), skinMat);
+            torso.position.y = 1.2;
+            rivalGroup.add(torso);
+
+            const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 16, 16), skinMat);
+            head.position.y = 1.75;
+            rivalGroup.add(head);
+
+            rivalGroup.leftGlove = new THREE.Mesh(new THREE.SphereGeometry(0.11, 12, 12), gloveMat);
+            rivalGroup.leftGlove.position.set(-0.25, 1.45, 0.35);
+            rivalGroup.add(rivalGroup.leftGlove);
+
+            rivalGroup.rightGlove = new THREE.Mesh(new THREE.SphereGeometry(0.11, 12, 12), gloveMat);
+            rivalGroup.rightGlove.position.set(0.25, 1.45, 0.35);
+            rivalGroup.add(rivalGroup.rightGlove);
+
+            scene.add(rivalGroup);
+        }
+
+        function createPlayerGloves() {
+            const gloveMat = new THREE.MeshLambertMaterial({ color: 0x2563eb });
+            for(let i = 0; i < 2; i++) {
+                const glove = new THREE.Mesh(new THREE.SphereGeometry(0.12, 12, 12), gloveMat);
+                glove.position.set(i === 0 ? -0.28 : 0.28, 1.3, 1.4);
+                glove.userData = { lastZ: 1.4 };
+                scene.add(glove);
+                gloves.push(glove);
+            }
+        }
+
+        function renderLoop() {
+            if(GAME.isPlaying) updateRivalAI();
+            renderer.render(scene, camera);
+        }
+
+        function updateRivalAI() {
+            rivalTimer += 0.016;
+            if(rivalState === 'idle') {
+                rivalGroup.position.x = Math.sin(rivalTimer * 2) * 0.1;
+                if(rivalTimer > 2.2) { rivalState = 'attack'; rivalTimer = 0; }
+            } else if(rivalState === 'attack') {
+                rivalGroup.rightGlove.position.z += 0.08;
+                if(rivalGroup.rightGlove.position.z > 1.8) {
+                    SoundEngine.playPunch();
+                    GAME.playerHealth = Math.max(0, GAME.playerHealth - 12);
+                    updateHUD();
+                    rivalGroup.rightGlove.position.set(0.25, 1.45, 0.35);
+                    rivalState = 'idle'; rivalTimer = 0;
+                    if(GAME.playerHealth <= 0) endGame(false);
+                }
+            } else if(rivalState === 'hit') {
+                rivalGroup.position.z = -0.75;
+                if(rivalTimer > 0.2) {
+                    rivalGroup.position.set(0, 0, -0.6);
+                    rivalState = 'idle'; rivalTimer = 0;
+                }
+            }
+        }
+
+        function checkPunchHit(glove) {
+            const deltaZ = glove.userData.lastZ - glove.position.z;
+            glove.userData.lastZ = glove.position.z;
+
+            if(deltaZ > 0.05 && glove.position.z < 0.6) {
+                const targetPos = rivalGroup.position.clone();
+                targetPos.y += 1.6;
+
+                if(glove.position.distanceTo(targetPos) < 0.5 && rivalState !== 'hit') {
+                    SoundEngine.playPunch();
+                    GAME.rivalHealth = Math.max(0, GAME.rivalHealth - 15);
+                    rivalState = 'hit'; rivalTimer = 0;
+                    updateHUD();
+                    if(GAME.rivalHealth <= 0) endGame(true);
+                }
+            }
+        }
+
+        function initHandTracking() {
+            const video = document.getElementById('webcam-video');
+            const status = document.getElementById('status-bar');
+
+            const hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+
+            hands.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.5 });
+
+            hands.onResults((results) => {
+                if(!renderer.xr.isPresenting && results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    status.innerText = "🥊 Hand Tracking WebCam Activo";
+                    status.style.color = "#10b981";
+
+                    results.multiHandLandmarks.forEach((landmarks, index) => {
+                        if(index < 2) {
+                            const wrist = landmarks[0];
+                            const x = (0.5 - wrist.x) * 3.0;
+                            const y = (0.5 - wrist.y) * 2.0 + 1.3;
+                            const z = 1.5 - (wrist.z * -3.0);
+
+                            gloves[index].position.set(x, y, Math.max(0.1, z));
+                            checkPunchHit(gloves[index]);
+                        }
+                    });
+                }
+            });
+
+            const cameraMedia = new Camera(video, {
+                onFrame: async () => { if (GAME.isPlaying) await hands.send({ image: video }); },
+                width: 320, height: 240
+            });
+
+            cameraMedia.start().catch(() => { status.innerText = "Modo VR o Control Manual Activo."; });
+        }
+
+        document.getElementById('music-vol').addEventListener('input', (e) => {
+            SoundEngine.setVolume(e.target.value);
+        });
+
+        function startGame() {
+            GAME.playerHealth = 100; GAME.rivalHealth = 100;
+            GAME.timeRemaining = GAME.duration; GAME.isPlaying = true;
+            updateHUD();
+
+            SoundEngine.startMusic();
+
+            document.getElementById('start-screen').classList.add('hidden');
+            document.getElementById('end-screen').classList.add('hidden');
+
+            clearInterval(clockInterval);
+            clockInterval = setInterval(() => {
+                GAME.timeRemaining--;
+                document.getElementById('timer-val').innerText = GAME.timeRemaining;
+                if(GAME.timeRemaining <= 0) endGame(GAME.playerHealth > GAME.rivalHealth);
+            }, 1000);
+        }
+
+        function endGame(won) {
+            GAME.isPlaying = false;
+            clearInterval(clockInterval);
+            SoundEngine.stopMusic();
+            document.getElementById('end-title').innerText = won ? "¡VICTORIA!" : "DERROTA";
+            document.getElementById('end-screen').classList.remove('hidden');
+        }
+
+        function updateHUD() {
+            document.getElementById('player-health-fill').style.width = `${GAME.playerHealth}%`;
+            document.getElementById('rival-health-fill').style.width = `${GAME.rivalHealth}%`;
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        document.getElementById('start-btn').addEventListener('click', startGame);
+        document.getElementById('restart-btn').addEventListener('click', startGame);
+
+        init3D();
+        initHandTracking();
+    </script>
+</body>
+</html>
